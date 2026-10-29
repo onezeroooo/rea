@@ -80,6 +80,14 @@ Use Conventional Commit subjects and PR titles. Mark breaking changes with `!` o
 
 <!-- BEGIN:turborepo-agent-rules -->
 
+## Environments
+
+| Environment | Address | How it is updated | Data |
+|---|---|---|---|
+| No deployment on this host | None; there is no `.branch-merge` and no deploy script in the repo, so 上 / 合 has no environment to deploy to (not stated in the repo: how a merge to main is handled on this host) | Not applicable | Not applicable |
+| npm package `rea-agents` (publication, not a hosted environment) | npm registry | Merging the Release Please PR into main (`.github/workflows/release.yml`, CONTRIBUTING.md "Maintainer release checklist"); ordinary main pushes cannot publish | Not stated in the repo |
+| Public website | <https://rea.tools/> (Cloudflare Workers, `website/public/`) | Manual deployment, see `website/README.md#cloudflare-workers` | Static files in `website/public/` |
+
 # This is NOT the Turborepo you know
 
 Turborepo configuration, task behavior, and CLI commands can vary between installed versions and may differ from your training data. Resolve the `turbo` package from this file's directory or relevant workspace; in monorepos, it may not be visible from the repository root. For example, run `node -p "require.resolve('turbo/package.json')"` from a workspace that depends on `turbo`.
