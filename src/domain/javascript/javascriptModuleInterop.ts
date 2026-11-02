@@ -3,14 +3,14 @@ import * as t from "@babel/types";
 
 import type { JavaScriptModuleOrigin } from "./javascriptSemanticIr.js";
 import {
-  isUnshadowedGlobal,
   resolveSemanticBindingState,
   semanticScopeId,
   semanticStableInitializer,
   type JavaScriptSemanticAnalysisState,
   type JavaScriptSemanticBindingState,
 } from "./javascriptSemanticState.js";
-import { semanticRequireOrigin } from "./javascriptSemanticRequireOrigin.js";
+import { isUnshadowedGlobal } from "./javascriptSemanticMutationInitializers.js";
+import { readSemanticRequireOrigin } from "./javascriptSemanticRequireOriginSlot.js";
 import {
   childNodes,
   javaScriptAstChildKeys,
@@ -26,8 +26,10 @@ import {
 import { SemanticPropertyPathCoverage } from "./javascriptSemanticPropertyPaths.js";
 import {
   readExactJavaScriptLiteral,
+  runtimeFunctionParameters,
   unwrapJavaScriptExpression,
 } from "./javascriptAstValues.js";
+import { semanticKnownArrayIterationAt } from "./javascriptSemanticReferenceSources.js";
 
 // Match the complete Rolldown runtime operations, including its live getters.
 // Names and formatting are irrelevant; lexical roles, operators and keys are not.
@@ -81,6 +83,8 @@ export const createSemanticModuleInterop = (
     readonly intrinsicPath: (node: t.Node) => readonly string[] | undefined;
   },
 ) => {
+  const nativeArrayIteration = (array: t.ArrayExpression) =>
+    semanticKnownArrayIterationAt(array, state);
   const helpers = new Map<string, InteropHelper | null>();
   const origins = new Map<string, InteropOrigin>();
   const calls = new WeakMap<t.Node, InteropOrigin>();
@@ -271,7 +275,10 @@ export const createSemanticModuleInterop = (
       const { root, members } = electronMemberPath(current.callee);
       let bindTarget = root;
       let bindingArguments: JavaScriptIntrinsicInvocation["arguments"] =
-        expandJavaScriptInvocationArguments(current.arguments);
+        expandJavaScriptInvocationArguments(
+          current.arguments,
+          nativeArrayIteration,
+        );
       let captured = capturedIntrinsic(current.callee);
       let terminal = captured?.path.at(-1) === "bind";
       let path: readonly string[] | undefined = captured?.path.slice(0, -1);
@@ -286,6 +293,7 @@ export const createSemanticModuleInterop = (
           intrinsicPath,
           boundIntrinsic,
           intrinsicReadChanged,
+          nativeArrayIteration,
         );
         if (
           invocation?.kind !== "known" ||
@@ -492,7 +500,7 @@ export const createSemanticModuleInterop = (
     const required =
       converted === undefined
         ? undefined
-        : semanticRequireOrigin(converted.input, state)?.origin;
+        : readSemanticRequireOrigin(converted.input, state)?.origin;
     if (
       converted === undefined ||
       required === undefined ||
@@ -553,7 +561,7 @@ export const createSemanticModuleInterop = (
       converted === undefined ||
       initial.projection.length !== 0 ||
       converted.projection.length !== 0 ||
-      state.conditionalInitializers.has(initial.node)
+      state.conditionallySkippedExpressions.has(initial.node)
     )
       return undefined;
     const call = converted.node;
@@ -588,7 +596,7 @@ export const createSemanticModuleInterop = (
       resolveSemanticBindingState(state, input, input.name) !== binding
     )
       return undefined;
-    const required = semanticRequireOrigin(initial.node, state)?.origin;
+    const required = readSemanticRequireOrigin(initial.node, state)?.origin;
     if (required === undefined || required.importedPath.length !== 0)
       return undefined;
     if (convertedCall === undefined) return undefined;
@@ -617,12 +625,16 @@ export const createSemanticModuleInterop = (
     origin,
     callOrigin,
     intrinsicPath,
-    intrinsicInvocation: (node: t.CallExpression | t.OptionalCallExpression) =>
+    intrinsicInvocation: (
+      node: t.CallExpression | t.OptionalCallExpression,
+      callablePath = intrinsicPath,
+    ) =>
       resolveJavaScriptIntrinsicInvocation(
         node,
-        intrinsicPath,
+        callablePath,
         boundIntrinsic,
         intrinsicReadChanged,
+        nativeArrayIteration,
       ),
     boundIntrinsic,
     staticString,
@@ -662,10 +674,10 @@ const identityFunction = (
     !t.isFunction(node) ||
     node.async ||
     node.generator ||
-    node.params.length !== 1
+    runtimeFunctionParameters(node).length !== 1
   )
     return false;
-  const parameter = node.params[0];
+  const parameter = runtimeFunctionParameters(node)[0];
   const result = t.isBlockStatement(node.body)
     ? node.body.body.length === 1 && t.isReturnStatement(node.body.body[0])
       ? node.body.body[0].argument

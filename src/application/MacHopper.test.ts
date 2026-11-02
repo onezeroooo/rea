@@ -2,63 +2,99 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
-import { installMacHopper, type MacHopperInstallHost } from "./MacHopper.js";
+import { err, ok } from "../domain/result.js";
+import type {
+  HopperDownload,
+  HopperDownloadFailure,
+} from "./HopperDownload.js";
+import {
+  installMacHopper,
+  type MacHopperBundleVerification,
+  type MacHopperBundleInstallResult,
+  type MacHopperInstallHost,
+} from "./MacHopper.js";
 
 class FakeMacHopperHost implements MacHopperInstallHost {
   readonly archive = new TextEncoder().encode("hopper-dmg");
-  archiveOk = true;
-  valid = true;
+  feedFailure: HopperDownloadFailure | undefined;
+  packageFailure: HopperDownloadFailure | undefined;
+  feedBytes: Uint8Array | undefined;
+  packageDownloads = 0;
+  mounts = 0;
+  verification: MacHopperBundleVerification = "verified";
   existing = false;
   mountSucceeds = true;
   copySucceeds = true;
-  launcherSucceeds = true;
+  mountFailure: Error | undefined;
+  verificationFailure: Error | undefined;
   badHash = false;
   unmounts = 0;
   cleanups = 0;
+  installs = 0;
   opens = 0;
   replaces = false;
 
-  download = (url: string) =>
-    Promise.resolve(
-      url.includes("files-api")
-        ? {
-            ok: true,
-            bytes: new TextEncoder().encode(
-              JSON.stringify({
-                "OS X": {
-                  filename:
-                    "https://www.hopperapp.com:443/downloader/public/Hopper-demo.dmg",
-                  file_length: String(this.archive.byteLength),
-                  file_hash: this.badHash
-                    ? "0".repeat(40)
-                    : createHash("sha1").update(this.archive).digest("hex"),
-                },
-              }),
-            ),
-          }
-        : { ok: this.archiveOk, bytes: this.archive },
+  download = (url: string): Promise<HopperDownload> => {
+    const feed = url.includes("files-api");
+    if (!feed) this.packageDownloads += 1;
+    const failure = feed ? this.feedFailure : this.packageFailure;
+    if (failure !== undefined) return Promise.resolve(err(failure));
+    return Promise.resolve(
+      ok(
+        feed
+          ? (this.feedBytes ??
+              new TextEncoder().encode(
+                JSON.stringify({
+                  "OS X": {
+                    filename:
+                      "https://www.hopperapp.com:443/downloader/public/Hopper-demo.dmg",
+                    file_length: String(this.archive.byteLength),
+                    file_hash: this.badHash
+                      ? "0".repeat(40)
+                      : createHash("sha1").update(this.archive).digest("hex"),
+                  },
+                }),
+              ))
+          : this.archive,
+      ),
     );
+  };
   createTemporaryDirectory = () => Promise.resolve("/tmp/rea-hopper-test");
   createMountDirectory = () => Promise.resolve();
   writePackage = () => Promise.resolve();
-  mount = () => Promise.resolve(this.mountSucceeds);
+  mount = () => {
+    this.mounts += 1;
+    return this.mountFailure === undefined
+      ? Promise.resolve(this.mountSucceeds)
+      : Promise.reject(this.mountFailure);
+  };
   unmount = () => {
     this.unmounts += 1;
     return Promise.resolve();
   };
   appBundle = () => Promise.resolve("/mounted/Hopper Disassembler.app");
-  validBundle = () => Promise.resolve(this.valid);
+  validBundle = () =>
+    this.verificationFailure === undefined
+      ? Promise.resolve(this.verification)
+      : Promise.reject(this.verificationFailure);
   destinationExists = () => Promise.resolve(this.existing);
   installBundle = (
     _source: string,
     _destination: string,
-    _stage: string,
     replaceExisting: boolean,
   ) => {
+    this.installs += 1;
     this.replaces = replaceExisting;
-    return Promise.resolve(this.copySucceeds);
+    return Promise.resolve<MacHopperBundleInstallResult>(
+      this.copySucceeds
+        ? { status: "installed" }
+        : {
+            status: "failed",
+            reason: "copy",
+            diagnostic: "ditto: destination is read-only",
+          },
+    );
   };
-  launcherReady = () => Promise.resolve(this.launcherSucceeds);
   openApplication = () => {
     this.opens += 1;
     return Promise.resolve();
@@ -70,6 +106,12 @@ class FakeMacHopperHost implements MacHopperInstallHost {
   destination = () => "/home/user/Applications/Hopper Disassembler.app";
 }
 
+const feedText = async (host: FakeMacHopperHost): Promise<string> => {
+  const feed = await host.download("files-api");
+  if (!feed.ok) throw new Error("Expected the fixture feed");
+  return new TextDecoder().decode(feed.value);
+};
+
 describe("macOS Hopper installation", () => {
   it("installs, verifies, opens, and cleans the official package", async () => {
     const host = new FakeMacHopperHost();
@@ -79,6 +121,22 @@ describe("macOS Hopper installation", () => {
         "/home/user/Applications/Hopper Disassembler.app/Contents/MacOS/hopper",
     });
     expect(host.opens).toBe(1);
+    expect(host.unmounts).toBe(1);
+    expect(host.cleanups).toBe(1);
+  });
+
+  it("preserves installation when macOS cannot open the installed app", async () => {
+    const host = new FakeMacHopperHost();
+    host.openApplication = () =>
+      Promise.reject(new Error("LaunchServices refused"));
+
+    await expect(installMacHopper({}, host)).resolves.toEqual({
+      status: "installed",
+      launcherPath:
+        "/home/user/Applications/Hopper Disassembler.app/Contents/MacOS/hopper",
+      openFailure: "LaunchServices refused",
+    });
+    expect(host.installs).toBe(1);
     expect(host.unmounts).toBe(1);
     expect(host.cleanups).toBe(1);
   });
@@ -115,7 +173,7 @@ describe("macOS Hopper installation", () => {
 
   it("cleans and detaches after bundle validation fails", async () => {
     const host = new FakeMacHopperHost();
-    host.valid = false;
+    host.verification = "invalid_signature";
     await expect(installMacHopper({}, host)).resolves.toEqual({
       status: "failed",
       reason: "bundle",
@@ -123,4 +181,181 @@ describe("macOS Hopper installation", () => {
     expect(host.unmounts).toBe(1);
     expect(host.cleanups).toBe(1);
   });
+
+  it("preserves a thrown mount-stage diagnostic and cleans the temporary image", async () => {
+    const host = new FakeMacHopperHost();
+    host.mountFailure = new Error("hdiutil attach: resource busy");
+
+    await expect(installMacHopper({}, host)).resolves.toMatchObject({
+      status: "failed",
+      reason: "mount",
+      diagnostic: "hdiutil attach: resource busy",
+    });
+    expect(host.unmounts).toBe(0);
+    expect(host.cleanups).toBe(1);
+  });
+
+  it("preserves the copy diagnostic from the owned install operation", async () => {
+    const host = new FakeMacHopperHost();
+    host.copySucceeds = false;
+
+    await expect(installMacHopper({}, host)).resolves.toMatchObject({
+      status: "failed",
+      reason: "copy",
+      diagnostic: "ditto: destination is read-only",
+    });
+    expect(host.installs).toBe(1);
+    expect(host.unmounts).toBe(1);
+    expect(host.cleanups).toBe(1);
+  });
+
+  it("reports a publisher mismatch without copying or launching the bundle", async () => {
+    const host = new FakeMacHopperHost();
+    host.verification = "unverified_publisher";
+    await expect(installMacHopper({}, host)).resolves.toEqual({
+      status: "failed",
+      reason: "publisher_verification_failed",
+    });
+    expect(host.installs).toBe(0);
+    expect(host.opens).toBe(0);
+    expect(host.unmounts).toBe(1);
+    expect(host.cleanups).toBe(1);
+  });
+
+  it("preserves a thrown signature-check diagnostic as a bundle failure", async () => {
+    const host = new FakeMacHopperHost();
+    host.verificationFailure = new Error("codesign: helper unavailable");
+
+    await expect(installMacHopper({}, host)).resolves.toMatchObject({
+      status: "failed",
+      reason: "bundle",
+      diagnostic: "codesign: helper unavailable",
+    });
+    expect(host.installs).toBe(0);
+    expect(host.unmounts).toBe(1);
+    expect(host.cleanups).toBe(1);
+  });
 });
+
+it("reports an unresolved destination probe without claiming an existing installation", async () => {
+  const host = new FakeMacHopperHost();
+  host.destinationExists = async () => {
+    throw Object.assign(new Error("destination inspection denied"), {
+      code: "EACCES",
+    });
+  };
+  expect(await installMacHopper({ replaceExisting: true }, host)).toMatchObject(
+    {
+      status: "failed",
+      reason: "destination_inspection",
+      diagnostic: "destination inspection denied",
+    },
+  );
+  expect(host.installs).toBe(0);
+  expect(host.unmounts).toBe(0);
+});
+
+it("retains the exact DMG temporary root with its retry capability", async () => {
+  const host = new FakeMacHopperHost();
+  const retained: {
+    close: () => Promise<void>;
+    resources: readonly string[];
+  }[] = [];
+  let allowCleanup = false;
+  const result = await installMacHopper(
+    {},
+    {
+      ...host,
+      cleanup: async () => {
+        if (!allowCleanup) throw new Error("DMG root busy");
+      },
+      retainCleanup: (close, resources) => {
+        retained.push({ close, resources });
+      },
+    },
+  );
+  expect(result).toMatchObject({
+    status: "installed",
+    cleanupFailure: expect.stringContaining("DMG root busy"),
+  });
+  expect(retained).toHaveLength(1);
+  expect(retained[0]?.resources).toEqual(["/tmp/rea-hopper-test"]);
+  allowCleanup = true;
+  await expect(retained[0]!.close()).resolves.toBeUndefined();
+});
+
+it("refuses malformed UTF-8 release metadata before downloading or mounting the package", async () => {
+  const host = new FakeMacHopperHost();
+  const text = await feedText(host);
+  // Replacement decoding would produce valid JSON and hide the malformed transport byte.
+  host.feedBytes = new Uint8Array([
+    ...new TextEncoder().encode('{"vendor_note":"'),
+    0xff,
+    ...new TextEncoder().encode('",' + text.slice(1)),
+  ]);
+  expect(await installMacHopper({}, host)).toMatchObject({
+    status: "failed",
+    reason: "release_metadata",
+  });
+  expect(host.packageDownloads).toBe(0);
+  expect(host.mounts).toBe(0);
+  expect(host.installs).toBe(0);
+});
+
+it.each([false, true])(
+  "accepts a genuine replacement character in release metadata (BOM=%s)",
+  async (bom) => {
+    const host = new FakeMacHopperHost();
+    const text = (await feedText(host)).replace(
+      '{"OS X":{',
+      '{"OS X":{"vendor_note":"雪�",',
+    );
+    host.feedBytes = new TextEncoder().encode((bom ? "\uFEFF" : "") + text);
+    expect(await installMacHopper({}, host)).toMatchObject({
+      status: "installed",
+    });
+    expect(host.packageDownloads).toBe(1);
+    expect(host.mounts).toBe(1);
+    expect(host.installs).toBe(1);
+  },
+);
+
+it("refuses release URLs that normalize outside the public channel before package download", async () => {
+  const host = new FakeMacHopperHost();
+  const row = JSON.parse(await feedText(host));
+  row["OS X"].filename =
+    "https://www.hopperapp.com:443/downloader/public/%2e%2e/private/Hopper-demo.dmg";
+  host.feedBytes = new TextEncoder().encode(JSON.stringify(row));
+
+  expect(await installMacHopper({}, host)).toMatchObject({
+    status: "failed",
+    reason: "release_metadata",
+  });
+  expect(host.packageDownloads).toBe(0);
+  expect(host.mounts).toBe(0);
+});
+
+it.each(["feed", "package"] as const)(
+  "attributes a failed %s request to its stage before any mount",
+  async (stage) => {
+    const host = new FakeMacHopperHost();
+    const failure = {
+      url: "https://fixture.invalid/request",
+      kind: "timeout",
+      timeoutMs: 120_000,
+    } as const;
+    if (stage === "feed") host.feedFailure = failure;
+    else host.packageFailure = failure;
+    expect(await installMacHopper({}, host)).toEqual({
+      status: "failed",
+      reason: stage === "feed" ? "release_metadata" : "download",
+      download: {
+        request: stage === "feed" ? "release_feed" : "package",
+        ...failure,
+      },
+    });
+    expect(host.packageDownloads).toBe(stage === "feed" ? 0 : 1);
+    expect(host.mounts).toBe(0);
+    expect(host.cleanups).toBe(0);
+  },
+);
