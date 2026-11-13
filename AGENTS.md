@@ -138,7 +138,7 @@ human review occurred, maintainer scope approval, or merge permission.
 
 | Environment | Address | How it is updated | Data |
 |---|---|---|---|
-| No deployment on this host | None; there is no `.branch-merge` and no deploy script in the repo, so 上 / 合 has no environment to deploy to (on this host a merge to main is: run the check, fast-forward `main`, push) | Not applicable | Not applicable |
+| No deployment on this host | None; there is no `.shipflow-merge` and no deploy script in the repo, so 上 / 合 has no environment to deploy to (on this host a merge to main is: run the check, fast-forward `main`, push) | Not applicable | Not applicable |
 | npm package `rea-agents` (publication, not a hosted environment) | npm registry | Merging the Release Please PR into main (`.github/workflows/release.yml`, CONTRIBUTING.md "Maintainer release checklist"); ordinary main pushes cannot publish | Not applicable (published package) |
 | Public website | <https://rea.tools/> (Cloudflare Workers, `website/public/`) | Manual deployment, see `website/README.md#cloudflare-workers` | Static files in `website/public/` |
 
